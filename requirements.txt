@@ -1,3 +1,6 @@
+# dataset download
+kagglehub
+
 # ======================
 # CORE ML / DL
 # ======================
