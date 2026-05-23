@@ -1,0 +1,27 @@
+# ignore dataset
+/data/
+configs/
+embeddings/
+data/
+graphs/
+results/
+checkpoints/
+env/
+venv/
+__pycache__/
+*.npy
+*.pkl
+*.pt
+*.ckpt
+
+embeddings/
+data/
+graphs/
+results/
+checkpoints/
+env/
+*.npy
+*.pkl
+.ipynb_checkpoints/
+embeddings/
+*.npy
