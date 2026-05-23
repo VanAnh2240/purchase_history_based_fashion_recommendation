@@ -1,0 +1,54 @@
+# ======================
+# CORE ML / DL
+# ======================
+torch==2.10.0
+torchvision==0.25.0
+torchaudio==2.10.0
+numpy
+pandas
+scipy
+scikit-learn
+
+# ======================
+# GNN / RECOMMENDER
+# ======================
+torchmetrics
+pytorch-lightning
+
+# ======================
+# GRAPH / DATA
+# ======================
+networkx
+
+# ======================
+# CLIP / MULTIMODAL
+# ======================
+transformers
+open-clip-torch
+timm
+ftfy
+
+# ======================
+# TRAINING UTIL
+# ======================
+tqdm
+PyYAML
+joblib
+
+# ======================
+# IMAGE / CV
+# ======================
+opencv-python
+Pillow
+albumentations
+
+# ======================
+# EVALUATION
+# ======================
+tabulate
+
+# ======================
+# OPTIONAL (debug / notebook)
+# ======================
+ipykernel
+matplotlib
