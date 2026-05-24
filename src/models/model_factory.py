@@ -4,7 +4,7 @@ from src.models.lightgcn import LightGCN
 from src.models.graphsage import GraphSAGE
 from src.models.ngcf import NGCF
 
-from src.models.bpr import BPRMatrixFactorization
+from src.models.bpr import BPRModel
 from src.models.siamese import SiameseProjector
 
 
