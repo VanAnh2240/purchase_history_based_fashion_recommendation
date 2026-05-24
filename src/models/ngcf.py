@@ -8,18 +8,6 @@ import torch.nn.functional as F
 
 
 class NGCF(nn.Module):
-    """
-    Neural Graph Collaborative Filtering (Wang et al., 2019).
-    Giữ nguyên transformation matrices (W1, W2) và nonlinear activation.
-    Học được interaction phức tạp hơn LightGCN nhưng nặng hơn.
-
-    Tương thích hoàn toàn với HMGNNTrainer:
-      - forward(edge_index, use_cache) → (all_user_emb, all_item_emb)
-      - invalidate_cache()
-      - precompute_norm_adj(edge_index, n_nodes)   [gọi 1 lần trước khi train]
-      - init_item_embeddings_from_clip(item_feat)  [warm-start từ CLIP]
-      - predict(user_ids, item_ids)                [dùng trong BPR inference]
-    """
 
     def __init__(
         self,
