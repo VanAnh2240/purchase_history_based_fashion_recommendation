@@ -18,7 +18,7 @@ import torch
 import torch.nn.functional as F
 from torch.amp import autocast, GradScaler
 from torch.utils.data import DataLoader, Dataset
-from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, roc_auc_score
+from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
 torch.set_float32_matmul_precision("high")
 
 from config import (
@@ -37,7 +37,6 @@ CSV_CHUNK         = 500_000
 _TRAIN_BATCH_SIZE = BATCH_SIZE * 12
 _NUM_WORKERS      = 16
 _GRAD_ACCUM       = 1
-_L2_REG           = 1e-4  
 
 
 def set_seed(seed=SEED):
@@ -61,20 +60,9 @@ class HMTrainDataset(Dataset):
         self.adj_csr = adj_csr
         self.negs    = np.random.randint(0, n_items, len(user_arr), dtype=np.int32)
 
-    # FIX: hỗ trợ popularity-based hard negative sampling
-    def resample(self, item_popularity: np.ndarray = None):
-        """
-        Resample negatives mỗi epoch.
-        - item_popularity=None  → uniform random (dễ)
-        - item_popularity=array → sample theo popularity^0.75 (harder negatives)
-        """
-        if item_popularity is not None:
-            probs = item_popularity / item_popularity.sum()
-            self.negs = np.random.choice(
-                self.n_items, len(self.users), p=probs
-            ).astype(np.int32)
-        else:
-            self.negs = np.random.randint(0, self.n_items, len(self.users), dtype=np.int32)
+    def resample(self):
+        """Resample negatives mỗi epoch — tránh false negative rõ ràng."""
+        self.negs = np.random.randint(0, self.n_items, len(self.users), dtype=np.int32)
 
     def __len__(self):
         return len(self.users)
@@ -124,18 +112,10 @@ class HMEvalDataset(Dataset):
 # Loss
 # ─────────────────────────────────────────────────────────────────────────────
 
-# FIX: thêm L2 regularization vào BPR loss
-# Không có L2 → embedding norm tăng vô hạn → score collapse → model predict all-same
-def bpr_loss(user_emb, pos_emb, neg_emb, l2_reg: float = _L2_REG):
+def bpr_loss(user_emb, pos_emb, neg_emb):
     pos_score = (user_emb * pos_emb).sum(dim=-1)
     neg_score = (user_emb * neg_emb).sum(dim=-1)
-    bpr = -F.logsigmoid(pos_score - neg_score).mean()
-    l2  = (
-        user_emb.norm(dim=-1).pow(2).mean()
-        + pos_emb.norm(dim=-1).pow(2).mean()
-        + neg_emb.norm(dim=-1).pow(2).mean()
-    )
-    return bpr + l2_reg * l2
+    return -F.logsigmoid(pos_score - neg_score).mean()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -240,7 +220,7 @@ class HMGNNTrainer:
             if idx is not None:
                 feat[idx] = raw[i]
 
-        return torch.tensor(feat, dtype=torch.float32)
+        return torch.tensor(feat, dtype=torch.float32)  # CPU, inject sau
 
     def _build_model(self, n_users: int, n_items: int) -> torch.nn.Module:
         return get_model(
@@ -250,7 +230,13 @@ class HMGNNTrainer:
             embedding_dim=EMBEDDING_DIM,
         ).to(self.device)
 
+    # ── FIX: inject CLIP embedding vào model ──────────────────────────────
+
     def _init_model_with_clip(self, model, item_feat: torch.Tensor):
+        """
+        Inject CLIP/FashionCLIP embedding để khởi tạo item_embedding.
+        Thay vì để Xavier random init hoàn toàn.
+        """
         if hasattr(model, "init_item_embeddings_from_clip"):
             item_feat_dev = item_feat.to(self.device)
             model.init_item_embeddings_from_clip(item_feat_dev)
@@ -282,6 +268,7 @@ class HMGNNTrainer:
             pos_ids  = pos_ids.to(self.device, non_blocking=True)
             neg_ids  = neg_ids.to(self.device, non_blocking=True)
 
+            # FIX: use_cache=True chỉ khi không phải bước đầu của accumulation
             use_cache = (step % _GRAD_ACCUM != 0)
 
             if not use_cache:
@@ -290,7 +277,6 @@ class HMGNNTrainer:
             all_user_emb, all_item_emb = model(edge_index, use_cache=use_cache)
 
             with autocast("cuda"):
-                # FIX: bpr_loss giờ có L2 regularization
                 loss = bpr_loss(
                     all_user_emb[user_ids],
                     all_item_emb[pos_ids],
@@ -302,6 +288,7 @@ class HMGNNTrainer:
                 or ((step + 1) == len(loader))
             )
 
+            # self.scaler.scale(loss).backward(retain_graph=not is_last_accum)
             self.scaler.scale(loss).backward()
 
             if is_last_accum:
@@ -336,8 +323,7 @@ class HMGNNTrainer:
             persistent_workers=(_NUM_WORKERS > 0),
         )
 
-        # FIX: use_cache=False để tránh dùng cache stale từ train
-        all_user_emb, all_item_emb = model(edge_index, use_cache=False)
+        all_user_emb, all_item_emb = model(edge_index, use_cache=True)
 
         preds, labels = [], []
 
@@ -346,43 +332,23 @@ class HMGNNTrainer:
             item_ids = item_ids.to(self.device)
 
             with autocast("cuda"):
-                # FIX: raw dot-product, không sigmoid
-                # BPR score không calibrate cho sigmoid threshold tuyệt đối
-                score = (all_user_emb[user_ids] * all_item_emb[item_ids]).sum(dim=-1)
+                score = torch.sigmoid(
+                    (all_user_emb[user_ids] * all_item_emb[item_ids]).sum(dim=-1)
+                )
 
-            preds.extend(score.cpu().float().numpy())
+            preds.extend(score.cpu().numpy())
             labels.extend(label.numpy())
 
-        preds  = np.array(preds)
-        labels = np.array(labels)
-
-        # FIX: min-max normalize để threshold có ý nghĩa
-        score_min, score_max = preds.min(), preds.max()
-        if score_max - score_min > 1e-8:
-            preds = (preds - score_min) / (score_max - score_min)
-        else:
-            print("[WARN] All eval scores are identical — model may not be learning.")
-
-        return preds, labels
+        return np.array(preds), np.array(labels)
 
     def _compute_metrics(self, preds: np.ndarray, labels: np.ndarray) -> dict:
-        # FIX: dynamic median threshold thay vì hardcode THRESHOLD
-        threshold = float(np.median(preds))
-        y_pred = (preds >= threshold).astype(int)
+        y_pred = (preds >= THRESHOLD).astype(int)
         y_true = labels.astype(int)
-
-        # FIX: thêm AUC — metric đáng tin cậy hơn F1 vì không phụ thuộc threshold
-        try:
-            auc = roc_auc_score(y_true, preds)
-        except ValueError:
-            auc = 0.5  # fallback nếu chỉ có 1 class
-
         return {
             "accuracy":  accuracy_score(y_true, y_pred),
             "precision": precision_score(y_true, y_pred, zero_division=0),
             "recall":    recall_score(y_true, y_pred, zero_division=0),
             "f1":        f1_score(y_true, y_pred, zero_division=0),
-            "auc":       auc,
         }
 
     # ── main entry ────────────────────────────────────────────────────────
@@ -399,6 +365,7 @@ class HMGNNTrainer:
 
         user2idx, item2idx = self._load_mappings()
 
+        # Load CLIP embedding (CPU)
         item_feat = self._load_embeddings(n_items, item2idx)
         print(f"[SETUP] item_feat: {item_feat.shape}")
 
@@ -416,23 +383,19 @@ class HMGNNTrainer:
 
         print(f"[SETUP] train={len(train_users):,}  val={len(val_users):,}  test={len(test_users):,}")
 
-        # FIX: tính item popularity cho hard negative sampling
-        item_counts     = np.bincount(train_items, minlength=n_items).astype(np.float32)
-        item_popularity = item_counts ** 0.75   # smoothed (word2vec style)
-        print(f"[SETUP] item popularity computed (non-zero items: {(item_counts > 0).sum():,})")
-
         train_dataset = HMTrainDataset(train_users, train_items, n_items, adj_csr)
         val_dataset   = HMEvalDataset(val_users,   val_items,   n_items, adj_csr)
         test_dataset  = HMEvalDataset(test_users,  test_items,  n_items, adj_csr)
 
+        pin          = torch.cuda.is_available()
         train_loader = DataLoader(
             train_dataset,
             batch_size=_TRAIN_BATCH_SIZE,
-            shuffle=True,
-            num_workers=_NUM_WORKERS,
-            pin_memory=True,
-            persistent_workers=True,
-            prefetch_factor=4,
+            shuffle = True,
+            num_workers =_NUM_WORKERS,
+            pin_memory = True,
+            persistent_workers = True,
+            prefetch_factor = 4,
         )
 
         print(f"[LOADER] batch={_TRAIN_BATCH_SIZE}  workers={_NUM_WORKERS}  "
@@ -440,8 +403,9 @@ class HMGNNTrainer:
               f"batches/epoch={len(train_loader):,}")
 
         model = self._build_model(n_users, n_items)
+        self._init_model_with_clip(model, item_feat)
 
-        # FIX: chỉ gọi 1 lần (bản cũ bị duplicate)
+
         self._init_model_with_clip(model, item_feat)
         del item_feat
         if torch.cuda.is_available():
@@ -454,7 +418,6 @@ class HMGNNTrainer:
             print("[SETUP] norm_adj precomputed")
 
         optimizer = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE)
-        # FIX: track AUC thay vì F1 vì AUC không phụ thuộc threshold
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
             optimizer, mode="max", factor=0.5, patience=5,
         )
@@ -464,20 +427,21 @@ class HMGNNTrainer:
 
         ckpt_name = f"{self.feature}_{self.model_name}.pth"
         ckpt_path = self.ckpt_dir / ckpt_name
-
+        
         start_epoch = 1
-        best_auc    = 0.0   # FIX: dùng AUC thay F1 để chọn best checkpoint
+        best_f1     = 0.0
         best_epoch  = 0
+
 
         if ckpt_path.exists():
             print(f"[RESUME] Load từ {ckpt_path}")
-            ckpt = torch.load(ckpt_path, map_location=self.device, weights_only=False)
+            ckpt = torch.load(ckpt_path, map_location=self.device,weights_only=False)
             model.load_state_dict(ckpt["model"])
             optimizer.load_state_dict(ckpt["optimizer"])
             start_epoch = ckpt["epoch"] + 1
-            best_auc    = ckpt.get("best_auc", ckpt.get("best_f1", 0.0))
+            best_f1     = ckpt["best_f1"]
             best_epoch  = ckpt["epoch"]
-            print(f"[RESUME] Tiếp tục epoch {start_epoch}, best AUC={best_auc:.4f}\n")
+            print(f"[RESUME] Tiếp tục epoch {start_epoch}, best F1={best_f1:.4f}\n")
         else:
             print("[RESUME] Không có checkpoint → train mới.\n")
 
@@ -485,44 +449,33 @@ class HMGNNTrainer:
             torch.cuda.empty_cache()
 
         for epoch in range(start_epoch, NUM_EPOCHS + 1):
-            # FIX: hard negative sampling từ epoch 2 trở đi
-            # Epoch 1 dùng uniform để model warm-up, sau đó dùng popularity-based
-            if epoch <= 2:
-                train_dataset.resample(item_popularity=None)
-            else:
-                train_dataset.resample(item_popularity=item_popularity)
-
+            train_dataset.resample()
             train_loss = self._train_epoch(model, train_loader, optimizer, edge_index, epoch)
 
             val_preds, val_labels = self._run_eval(model, val_dataset, edge_index)
             val_metrics = self._compute_metrics(val_preds, val_labels)
-
-            # FIX: scheduler theo AUC
-            scheduler.step(val_metrics["auc"])
+            scheduler.step(val_metrics["f1"])
 
             print(
                 f"Epoch [{epoch:>3}/{NUM_EPOCHS}] loss={train_loss:.4f} | "
                 f"acc={val_metrics['accuracy']:.4f} "
                 f"prec={val_metrics['precision']:.4f} "
                 f"rec={val_metrics['recall']:.4f} "
-                f"f1={val_metrics['f1']:.4f} "
-                f"auc={val_metrics['auc']:.4f}"
+                f"f1={val_metrics['f1']:.4f}"
             )
 
-            # FIX: save checkpoint theo AUC thay vì F1
-            if val_metrics["auc"] > best_auc:
-                best_auc   = val_metrics["auc"]
+            if val_metrics["f1"] > best_f1:
+                best_f1    = val_metrics["f1"]
                 best_epoch = epoch
                 torch.save({
                     "model":     model.state_dict(),
                     "optimizer": optimizer.state_dict(),
                     "epoch":     epoch,
-                    "best_auc":  best_auc,
-                    "best_f1":   val_metrics["f1"],   # giữ lại để tham khảo
+                    "best_f1":   best_f1,
                 }, ckpt_path)
-                print(f"  ✓ Saved {ckpt_name} (auc={best_auc:.4f}, f1={val_metrics['f1']:.4f}, epoch={epoch})\n")
+                print(f"  ✓ Saved {ckpt_name} (f1={best_f1:.4f}, epoch={epoch})\n")
 
-        print(f"\n[TRAIN DONE] Best val AUC={best_auc:.4f} at epoch {best_epoch}")
+        print(f"\n[TRAIN DONE] Best val F1={best_f1:.4f} at epoch {best_epoch}")
 
         print("\n[TEST] Loading best checkpoint...")
         ckpt = torch.load(ckpt_path, map_location=self.device, weights_only=False)
@@ -535,8 +488,7 @@ class HMGNNTrainer:
             f"[TEST] acc={test_metrics['accuracy']:.4f} "
             f"prec={test_metrics['precision']:.4f} "
             f"rec={test_metrics['recall']:.4f} "
-            f"f1={test_metrics['f1']:.4f} "
-            f"auc={test_metrics['auc']:.4f}"
+            f"f1={test_metrics['f1']:.4f}"
         )
 
         if evaluator is not None:

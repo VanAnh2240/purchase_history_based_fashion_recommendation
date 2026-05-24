@@ -1,4 +1,4 @@
-# File src/models/graphsage.py
+# File: src/models/graphsage.py
 
 import torch
 import torch.nn as nn
@@ -7,35 +7,48 @@ import torch.nn.functional as F
 
 class GraphSAGE(nn.Module):
     """
-    GraphSAGE: mô hình GNN có neighbor aggregation
+    Optimized GraphSAGE (FAST FULL-GRAPH VERSION)
 
-    FIX:
-    - aggregate() tính degree đúng cho cả row lẫn col
-      (trước đây chỉ đếm row → node chỉ xuất hiện ở col bị normalize sai)
-    - Thêm support init item embedding từ CLIP
+    Fixes:
+    - COO → CSR sparse matrix (faster mm)
+    - adjacency build only once (cached, not rebuilt every forward)
+    - invalidate_cache chỉ reset embedding cache, không reset adj
+    - reduced overhead in forward
     """
 
     def __init__(self, num_users, num_items, embedding_dim=64, hidden_dim=64):
-        super(GraphSAGE, self).__init__()
+        super().__init__()
 
         self.num_users = num_users
         self.num_items = num_items
+        self.embedding_dim = embedding_dim
 
         self.user_embedding = nn.Embedding(num_users, embedding_dim)
         self.item_embedding = nn.Embedding(num_items, embedding_dim)
 
-        # transform sau aggregate
         self.linear = nn.Linear(embedding_dim * 2, hidden_dim)
 
         nn.init.xavier_uniform_(self.user_embedding.weight)
         nn.init.xavier_uniform_(self.item_embedding.weight)
 
+        self._adj   = None   # adjacency matrix — persist across epochs
+        self._cache = None   # embedding output cache — reset each epoch
+
+    # ───────────────────────── cache ─────────────────────────
+
+    def invalidate_cache(self):
+        # FIX: chỉ reset embedding cache, KHÔNG reset _adj
+        # _adj không đổi trong suốt quá trình training → không cần rebuild
+        self._cache = None
+
+    # ───────────────────────── CLIP init ─────────────────────
+
     def init_item_embeddings_from_clip(self, item_feat: torch.Tensor):
         feat_dim = item_feat.shape[1]
-        embedding_dim = self.item_embedding.embedding_dim
+        emb_dim  = self.item_embedding.embedding_dim
 
-        if feat_dim != embedding_dim:
-            proj = nn.Linear(feat_dim, embedding_dim, bias=False)
+        if feat_dim != emb_dim:
+            proj = nn.Linear(feat_dim, emb_dim, bias=False).to(item_feat.device)
             nn.init.xavier_uniform_(proj.weight)
             with torch.no_grad():
                 projected = proj(item_feat.float())
@@ -45,50 +58,67 @@ class GraphSAGE(nn.Module):
         with torch.no_grad():
             self.item_embedding.weight.copy_(projected)
 
-        print(f"[GraphSAGE] item_embedding initialized from CLIP features ✓")
+        print("[GraphSAGE] item_embedding initialized from CLIP features ✓")
 
-    def forward(self, edge_index):
-        users = self.user_embedding.weight
-        items = self.item_embedding.weight
+    # ───────────────────────── adjacency build ───────────────
 
-        all_emb = torch.cat([users, items], dim=0)
+    def _build_adj(self, edge_index, n_nodes):
+        row, col = edge_index
 
-        agg_emb = self.aggregate(edge_index, all_emb)
+        indices = torch.stack([row, col], dim=0)
+        values  = torch.ones(row.size(0), device=row.device)
 
-        # concat self + neighbor
+        adj = torch.sparse_coo_tensor(
+            indices,
+            values,
+            (n_nodes, n_nodes),
+            device=row.device
+        ).coalesce()
+
+        deg     = torch.sparse.sum(adj, dim=1).to_dense().clamp(min=1e-10)
+        deg_inv = 1.0 / deg
+        values  = adj.values() * deg_inv[row]
+
+        adj_norm = torch.sparse_coo_tensor(
+            adj.indices(),
+            values,
+            adj.shape,
+            device=row.device
+        ).coalesce()
+
+        return adj_norm.to_sparse_csr()
+
+    # ───────────────────────── forward ───────────────────────
+
+    def forward(self, edge_index: torch.Tensor, use_cache: bool = False):
+        if use_cache and self._cache is not None:
+            return self._cache
+
+        all_emb = torch.cat([
+            self.user_embedding.weight,
+            self.item_embedding.weight
+        ], dim=0)
+
+        # FIX: build adjacency một lần duy nhất, tái sử dụng mọi epoch
+        # edge_index không thay đổi trong training → không cần rebuild
+        if self._adj is None:
+            self._adj = self._build_adj(edge_index, self.num_users + self.num_items)
+
+        agg_emb = torch.sparse.mm(self._adj, all_emb)
+
         out = torch.cat([all_emb, agg_emb], dim=1)
         out = self.linear(out)
         out = F.relu(out)
 
-        users_out, items_out = torch.split(out, [self.num_users, self.num_items])
+        users_out, items_out = torch.split(
+            out,
+            [self.num_users, self.num_items]
+        )
 
+        self._cache = (users_out, items_out)
         return users_out, items_out
 
-    def aggregate(self, edge_index, emb):
-        """
-        FIX: degree tính cho cả row VÀ col.
-
-        Trước đây:
-            deg = bincount(row) → node chỉ ở col có deg≈0 → chia 1e-10 → NaN/explosion
-
-        Sau fix:
-            deg = bincount(row) + bincount(col) → đúng cho undirected graph
-        """
-        row, col = edge_index
-        n = emb.size(0)
-
-        out = torch.zeros_like(emb)
-        out.index_add_(0, row, emb[col])
-        out.index_add_(0, col, emb[row])
-
-        # FIX: degree phải đếm cả hai chiều
-        deg_row = torch.bincount(row, minlength=n).float()
-        deg_col = torch.bincount(col, minlength=n).float()
-        deg = (deg_row + deg_col).unsqueeze(1).clamp(min=1e-10)
-
-        out = out / deg
-
-        return out
+    # ───────────────────────── predict ───────────────────────
 
     def predict(self, users_emb, items_emb, u, i):
         return torch.sum(users_emb[u] * items_emb[i], dim=1)
