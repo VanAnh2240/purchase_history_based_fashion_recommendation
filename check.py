@@ -1,3 +1,6 @@
+# pip uninstall torch torchvision torchaudio -y
+# pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128
+
 import torch
 import sys
 import platform

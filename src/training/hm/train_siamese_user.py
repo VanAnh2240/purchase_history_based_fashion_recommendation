@@ -50,7 +50,7 @@ torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32       = True
 
 CSV_CHUNK         = 1_000_000
-_TRAIN_BATCH_SIZE = 2048
+_TRAIN_BATCH_SIZE = BATCH_SIZE 
 _NUM_WORKERS      = 8
 _GRAD_ACCUM       = 2
 _LR_SIAMESE       = min(LEARNING_RATE, 1e-4)

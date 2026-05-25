@@ -3,9 +3,9 @@ src/models/ngcf.py — Neural Graph Collaborative Filtering
 """
 
 import torch
+from torch import amp
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.cuda.amp import autocast
 
 
 class NGCF(nn.Module):
@@ -183,11 +183,7 @@ class NGCF(nn.Module):
         all_layer_embs = [ego]
 
         for l in range(self.num_layers):
-
-            # IMPORTANT:
-            # sparse.mm CUDA does NOT support fp16
-            # force fp32 here
-            with autocast(enabled=False):
+            with amp.autocast("cuda", enabled=False):
 
                 ego_f32 = ego.float()
 
@@ -206,14 +202,13 @@ class NGCF(nn.Module):
             neigh = neigh.to(ego.dtype)
             interaction = interaction.to(ego.dtype)
 
-            # NGCF update
+
             ego = F.leaky_relu(
                 self.W1[l](ego + neigh)
                 + self.W2[l](interaction),
                 negative_slope=0.2,
             )
 
-            # Optional dropout
             if self.dropout > 0:
                 ego = F.dropout(
                     ego,

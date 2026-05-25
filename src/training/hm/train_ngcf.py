@@ -33,11 +33,14 @@ from config import (
 from src.models.model_factory import get_model
 from src.evaluation.evaluator import Evaluator
 
+torch.backends.cuda.matmul.allow_tf32 = True
+torch.backends.cudnn.allow_tf32 = True
+torch.sparse.check_sparse_tensor_invariants(False)
+
 CSV_CHUNK         = 500_000
-_TRAIN_BATCH_SIZE = 4096
-_NUM_WORKERS      = NUM_WORKERS
-_GRAD_ACCUM       = 2
-_TRAIN_BATCH_SIZE * 2
+_TRAIN_BATCH_SIZE = BATCH_SIZE * 12
+_NUM_WORKERS      = 16
+_GRAD_ACCUM       = 1
 
 
 def set_seed(seed=SEED):
