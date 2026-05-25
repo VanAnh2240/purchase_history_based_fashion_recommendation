@@ -8,6 +8,7 @@ results/
 checkpoints/
 env/
 venv/
+.venv/
 __pycache__/
 *.npy
 *.pkl
