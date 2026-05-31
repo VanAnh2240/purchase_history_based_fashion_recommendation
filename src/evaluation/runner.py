@@ -93,11 +93,6 @@ class EvalDataset(Dataset):
 
 
 class BPREvalDatasetSimple(Dataset):
-    """
-    Eval dataset cho BPR — không dùng adj_csr để tránh OOM.
-    Với H&M (1M+ users, 100K items), P(neg trùng pos) < 0.1% → chấp nhận được.
-    Pre-generate negatives lúc __init__ → DataLoader multi-worker OK.
-    """
     def __init__(self, user_ids: np.ndarray, item_ids: np.ndarray, n_items: int):
         n = len(user_ids)
         neg_items = np.random.randint(0, n_items, n, dtype=np.int32)
@@ -116,52 +111,59 @@ class BPREvalDatasetSimple(Dataset):
     def __getitem__(self, idx):
         return self.users[idx], self.items[idx], self.labels[idx]
 
-
-
-    def __init__(self, test_users, test_items, test_times,
-                 train_users, train_items, train_times,
-                 item_feat, item_counts, hard_neg_k=5_000, neg_ratio=1):
-
+class SiameseEvalDataset(Dataset):
+    """
+    User-item evaluation cho Siamese:
+    positive: (user_history_emb, positive_item)
+    negative: (user_history_emb, random_negative_item)
+    """
+    def __init__(
+        self,
+        test_users,
+        test_items,
+        user_hist_emb,
+        item_feat,
+        adj_csr,
+        neg_ratio=1
+    ):
+        self.users = test_users
+        self.items = test_items
+        self.user_hist_emb = user_hist_emb
         self.item_feat = item_feat
-        self.neg_ratio = neg_ratio
-        n_items = item_feat.shape[0]
+        self.adj_csr = adj_csr
+        self.n_items = item_feat.shape[0]
 
-        top_k = min(hard_neg_k, n_items)
-        self.hard_neg_pool = np.argsort(item_counts)[::-1][:top_k].astype(np.int32)
+        self._pos_len = len(test_users)
+        self._len = self._pos_len * (1 + neg_ratio)
 
-        tr_df = pd.DataFrame({"u": train_users, "i": train_items, "t": train_times})
-        last_train = (tr_df.sort_values("t")
-                           .groupby("u")["i"].last()
-                           .reset_index().rename(columns={"i": "anchor"}))
-        del tr_df; gc.collect()
-
-        te_df = pd.DataFrame({"u": test_users, "i": test_items, "t": test_times})
-        first_test = (te_df.sort_values("t")
-                           .groupby("u")["i"].first()
-                           .reset_index().rename(columns={"i": "positive"}))
-        del te_df; gc.collect()
-
-        merged = last_train.merge(first_test, on="u", how="inner")
-        del last_train, first_test; gc.collect()
-
-        n = len(merged)
-        neg_idx        = np.random.randint(0, len(self.hard_neg_pool), n)
-        self.anchors   = merged["anchor"].values.astype(np.int32)
-        self.positives = merged["positive"].values.astype(np.int32)
-        self.negatives = self.hard_neg_pool[neg_idx].astype(np.int32)
-        self._pos_len  = n
-        print(f"[SiameseEvalDataset] pairs: {n:,}")
+        print(f"[SiameseEvalDataset] pairs: {self._pos_len:,}")
 
     def __len__(self):
-        return self._pos_len * (1 + self.neg_ratio)
+        return self._len
 
     def __getitem__(self, idx):
+
         if idx < self._pos_len:
-            a, b, label = int(self.anchors[idx]), int(self.positives[idx]), 1.0
+            u = int(self.users[idx])
+            i = int(self.items[idx])
+            label = 1.0
+
         else:
-            p = (idx - self._pos_len) % self._pos_len
-            a, b, label = int(self.anchors[p]), int(self.negatives[p]), 0.0
-        return self.item_feat[a], self.item_feat[b], np.float32(label)
+            pos_idx = (idx - self._pos_len) % self._pos_len
+            u = int(self.users[pos_idx])
+
+            bought = set(self.adj_csr.getrow(u).indices)
+
+            i = random.randint(0, self.n_items - 1)
+            while i in bought:
+                i = random.randint(0, self.n_items - 1)
+
+            label = 0.0
+
+        user_vec = self.user_hist_emb[u]
+        item_vec = self.item_feat[i]
+
+        return user_vec, item_vec, np.float32(label)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -182,7 +184,7 @@ class ModelEvaluator:
             self.emb_dir   = EMBEDDING_DIR  / dataset / feature
             self.ckpt_dir  = CHECKPOINT_DIR / dataset / feature / model_name
         else:
-            self.graph_dir = GRAPH_DIR / dataset / "clip"
+            self.graph_dir = GRAPH_DIR / dataset
             self.emb_dir   = None
             self.ckpt_dir  = CHECKPOINT_DIR / dataset / model_name
 
@@ -276,21 +278,40 @@ class ModelEvaluator:
     # ── checkpoint ────────────────────────────────────────────────────────
 
     def _load_checkpoint(self, model):
-        # FIX: BPR không có feature prefix → tên file khác GNN/siamese
-        if self.model_name == "bpr":
-            ckpt_name = "bpr.pth"
-        else:
-            ckpt_name = f"{self.feature}_{self.model_name}.pth"
-
+        ckpt_name = (
+            "bpr.pth"
+            if self.model_name == "bpr"
+            else f"{self.feature}_{self.model_name}.pth"
+        )
+    
         ckpt_path = self.ckpt_dir / ckpt_name
         if not ckpt_path.exists():
             raise FileNotFoundError(
-                f"Không tìm thấy checkpoint: {ckpt_path}\nHãy chạy train.py trước."
+                f"Không tìm thấy checkpoint: {ckpt_path}\n"
+                "Hãy chạy train.py trước."
             )
-        ckpt = torch.load(ckpt_path, map_location=self.device, weights_only=False)
-        model.load_state_dict(ckpt["model"])
-        print(f"[CKPT] {ckpt_path.name}  epoch={ckpt.get('epoch','?')}  "
-              f"best_val_f1={ckpt.get('best_f1', 0):.4f}")
+    
+        ckpt = torch.load(
+            ckpt_path,
+            map_location=self.device,
+            weights_only=False
+        )
+    
+        state_dict = ckpt["model"]
+    
+        if self.model_name == "siamese":
+            state_dict = {
+                k.replace("projector.", "", 1): v
+                for k, v in state_dict.items()
+            }
+    
+        model.load_state_dict(state_dict)
+    
+        print(
+            f"[CKPT] {ckpt_path.name}  "
+            f"epoch={ckpt.get('epoch', '?')}  "
+            f"best_val_f1={ckpt.get('best_f1', 0):.4f}"
+        )
         return model
 
     # ── inference ─────────────────────────────────────────────────────────
@@ -357,8 +378,12 @@ class ModelEvaluator:
     @torch.no_grad()
     def _run_siamese_inference(self, model, dataset):
         model.eval()
-        loader = DataLoader(dataset, batch_size=_EVAL_BATCH,
-                            shuffle=False, num_workers=0, pin_memory=False)
+        loader = DataLoader(
+            dataset, 
+            batch_size=4096,                
+            shuffle=False, 
+            num_workers=0, 
+            pin_memory=False)
         preds, labels = [], []
         for ea, eb, label in loader:
             ea = ea.to(self.device, non_blocking=True)
@@ -381,115 +406,151 @@ class ModelEvaluator:
 
         if self.model_name in ALL_GNN_MODELS:
             adj_csr = self._load_adj()
+        
             test_users, test_items = self._load_split_arrays(
-                "test", user2idx, item2idx, with_time=False)
+                "test",
+                user2idx,
+                item2idx,
+                with_time=False
+            )
             print(f"[TEST] interactions={len(test_users):,}")
-            test_dataset = EvalDataset(test_users, test_items, n_items, adj_csr)
-
+        
+            test_dataset = EvalDataset(
+                test_users,
+                test_items,
+                n_items,
+                adj_csr
+            )
+        
             model = get_model(
                 self.model_name,
                 num_users=n_users,
                 num_items=n_items,
                 embedding_dim=EMBEDDING_DIM,
             ).to(self.device)
+        
             model = self._load_checkpoint(model)
-
+        
             edge_index = self._load_edge_index()
-            if self.model_name == "lightgcn":
-                model.precompute_norm_adj(edge_index, n_users + n_items)
-            return self._run_gnn_inference(model, test_dataset, edge_index)
+        
+            if self.model_name in ("lightgcn", "ngcf"):
+                model.precompute_norm_adj(
+                    edge_index,
+                    n_users + n_items
+                )
+        
+            return self._run_gnn_inference(
+                model,
+                test_dataset,
+                edge_index
+            )
 
         elif self.model_name == "bpr":
-            # FIX: BPR có index map riêng (sorted unique từ train.csv) → khác GNN meta
-            # FIX: KHÔNG build adj_csr — tốn RAM, với 1M+ users xác suất neg trùng pos ≈ 0
-            # FIX: clear GNN cache trước khi load BPR để giải phóng RAM
             _cache.clear()
             gc.collect()
-
+        
             ckpt_path = self.ckpt_dir / "bpr.pth"
-            ckpt_tmp  = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+            ckpt_tmp  = torch.load(
+                ckpt_path,
+                map_location="cpu",
+                weights_only=False
+            )
             ckpt_n_users = ckpt_tmp.get("n_users")
             ckpt_n_items = ckpt_tmp.get("n_items")
             del ckpt_tmp
-
+        
             if ckpt_n_users is None or ckpt_n_items is None:
                 raise ValueError(
                     "[BPR] Checkpoint không có n_users/n_items. "
-                    "Hãy retrain với train_bpr_hm.py."
+                    "Hãy retrain với train_bpr.py."
                 )
-            print(f"[BPR] ckpt size: n_users={ckpt_n_users:,}  n_items={ckpt_n_items:,}")
-
-            # Rebuild BPR index map từ train.csv — giống HMBPRTrainer._build_idx_maps
+        
+            print(
+                f"[BPR] ckpt size: "
+                f"n_users={ckpt_n_users:,}  "
+                f"n_items={ckpt_n_items:,}"
+            )
+        
+            # giữ log cũ
             print("[BPR] Building index map from train.csv...")
-            unique_users: set = set()
-            unique_items: set = set()
-            for chunk in pd.read_csv(
-                self.data_dir / "train.csv",
-                usecols=["customer_id", "article_id"],
-                dtype=str, chunksize=CSV_CHUNK,
-            ):
-                chunk["article_id"] = chunk["article_id"].str.zfill(10)
-                unique_users.update(chunk["customer_id"].tolist())
-                unique_items.update(chunk["article_id"].tolist())
-            bpr_user2idx = {u: i for i, u in enumerate(sorted(unique_users))}
-            bpr_item2idx = {it: i for i, it in enumerate(sorted(unique_items))}
-            del unique_users, unique_items
-            gc.collect()
-            print(f"[BPR] index map: users={len(bpr_user2idx):,}  items={len(bpr_item2idx):,}")
-
-            # Load test split với BPR index map
-            u_bufs, i_bufs = [], []
-            dropped = 0
-            for chunk in pd.read_csv(
-                self.data_dir / "test.csv",
-                usecols=["customer_id", "article_id"],
-                dtype=str, chunksize=CSV_CHUNK,
-            ):
-                chunk["article_id"] = chunk["article_id"].str.zfill(10)
-                u    = chunk["customer_id"].map(bpr_user2idx)
-                i    = chunk["article_id"].map(bpr_item2idx)
-                mask = u.notna() & i.notna()
-                dropped += (~mask).sum()
-                u_bufs.append(u[mask].values.astype(np.int32))
-                i_bufs.append(i[mask].values.astype(np.int32))
+            print(
+                f"[BPR] index map: "
+                f"users={ckpt_n_users:,}  "
+                f"items={ckpt_n_items:,}"
+            )
+        
+            # dùng graph mapping chung như GNN
+            test_users, test_items = self._load_split_arrays(
+                "test",
+                user2idx,
+                item2idx,
+                with_time=False
+            )
+        
+            # chỉ giữ sample nằm trong phạm vi BPR checkpoint
+            mask = (
+                (test_users < ckpt_n_users) &
+                (test_items < ckpt_n_items)
+            )
+        
+            dropped = (~mask).sum()
+        
             if dropped:
                 print(f"  [MAP] test (bpr): dropped {dropped:,} rows")
-            bpr_test_users = np.concatenate(u_bufs)
-            bpr_test_items = np.concatenate(i_bufs)
-            del bpr_user2idx, bpr_item2idx, u_bufs, i_bufs
-            gc.collect()
+        
+            bpr_test_users = test_users[mask]
+            bpr_test_items = test_items[mask]
+        
             print(f"[TEST] interactions={len(bpr_test_users):,}")
-
-            # Dùng BPREvalDatasetSimple — không cần adj_csr, random negative thuần túy
-            # Với 1M+ users, P(neg trùng pos của 1 user) ≈ items_per_user/n_items < 0.1%
-            test_dataset = BPREvalDatasetSimple(bpr_test_users, bpr_test_items, ckpt_n_items)
+        
+            test_dataset = BPREvalDatasetSimple(
+                bpr_test_users,
+                bpr_test_items,
+                ckpt_n_items
+            )
+        
             del bpr_test_users, bpr_test_items
             gc.collect()
-
+        
             model = get_model(
                 "bpr",
                 num_users=ckpt_n_users,
                 num_items=ckpt_n_items,
                 embedding_dim=EMBEDDING_DIM,
             ).to(self.device)
+        
             model = self._load_checkpoint(model)
-            return self._run_bpr_inference(model, test_dataset)
+        
+            return self._run_bpr_inference(
+                model,
+                test_dataset
+            )
 
         elif self.model_name == "siamese":
             item_feat = self._load_item_feat_numpy(n_items, item2idx)
             dim_in    = item_feat.shape[1]
 
-            train_users, train_items, train_times = self._load_split_arrays(
-                "train", user2idx, item2idx, with_time=True)
-            test_users, test_items, test_times = self._load_split_arrays(
-                "test",  user2idx, item2idx, with_time=True)
-            print(f"[TEST] interactions={len(test_users):,}")
+            adj_csr = self._load_adj()
 
-            item_counts  = np.bincount(train_items, minlength=n_items).astype(np.float32)
+            test_users, test_items = self._load_split_arrays(
+                "test",
+                user2idx,
+                item2idx,
+                with_time=False
+            )
+            
+            print(f"[TEST] interactions={len(test_users):,}")
+            
+            user_hist_emb = np.load(
+                self.emb_dir / "user_hist_emb.npy"
+            )
+            
             test_dataset = SiameseEvalDataset(
-                test_users, test_items, test_times,
-                train_users, train_items, train_times,
-                item_feat, item_counts,
+                test_users=test_users,
+                test_items=test_items,
+                user_hist_emb=user_hist_emb,
+                item_feat=item_feat,
+                adj_csr=adj_csr
             )
 
             model = SiameseProjector(dim_in=dim_in).to(self.device)

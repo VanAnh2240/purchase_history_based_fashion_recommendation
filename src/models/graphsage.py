@@ -76,7 +76,7 @@ class GraphSAGE(nn.Module):
             device=row.device
         ).coalesce()
 
-        return adj_norm.to_sparse_csr()
+        return adj_norm
 
     # ───────────────────────── forward ───────────────────────
 

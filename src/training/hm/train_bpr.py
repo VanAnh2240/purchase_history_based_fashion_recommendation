@@ -14,7 +14,7 @@ from tqdm import tqdm
 from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
 
 from config import (
-    PROCESSED_DIR, CHECKPOINT_DIR,
+    PROCESSED_DIR, CHECKPOINT_DIR, GRAPH_DIR,
     DEVICE, SEED,
     BATCH_SIZE, NUM_EPOCHS, LEARNING_RATE, WEIGHT_DECAY,
     EMBEDDING_DIM, LOGIT_SCALE, NUM_WORKERS, THRESHOLD,
@@ -67,10 +67,6 @@ class BPRTrainDataset(Dataset):
 
 
 class BPREvalDataset(Dataset):
-    """
-    Balanced 1:1 pos:neg. Negatives pre-generated lúc __init__
-    → không adj_csr trong __getitem__ → multi-worker OK.
-    """
     def __init__(self, user_ids: np.ndarray, item_ids: np.ndarray,
                  n_items: int, adj_csr: sp.csr_matrix):
         pos_u = user_ids.tolist()
@@ -113,32 +109,32 @@ class HMBPRTrainer:
         self.data_dir = PROCESSED_DIR / "hm"
         self.ckpt_dir = CHECKPOINT_DIR / "hm" / "bpr"
         self.ckpt_dir.mkdir(parents=True, exist_ok=True)
+        self.graph_dir = GRAPH_DIR / "hm"
         self.device   = DEVICE
         set_seed(SEED)
 
     # ── helpers ───────────────────────────────────────────────────────────
 
-    def _build_idx_maps(self) -> tuple[dict, dict]:
-        print("[BPR] Pass 1: collecting unique IDs from train.csv...")
-        unique_users: set[str] = set()
-        unique_items: set[str] = set()
-
-        for chunk in tqdm(
-            pd.read_csv(
-                self.data_dir / "train.csv",
-                usecols=["customer_id", "article_id"],
-                dtype=str, chunksize=_CSV_CHUNK,
-            ), desc="Pass 1",
+    def _build_idx_maps(self):
+        print("[BPR] Loading full graph index map...")
+    
+        unique_users = set()
+        unique_items = set()
+    
+        for chunk in pd.read_csv(
+            self.data_dir / "train.csv",
+            usecols = ["customer_id", "article_id"],
+            dtype = str,
+            chunksize = _CSV_CHUNK,
         ):
             chunk["article_id"] = chunk["article_id"].str.zfill(10)
-            unique_users.update(chunk["customer_id"].tolist())
-            unique_items.update(chunk["article_id"].tolist())
-
+            unique_users.update(chunk["customer_id"])
+            unique_items.update(chunk["article_id"])
+    
         user2idx = {u: i for i, u in enumerate(sorted(unique_users))}
-        item2idx = {it: i for i, it in enumerate(sorted(unique_items))}
-        del unique_users, unique_items
-        gc.collect()
-        print(f"[BPR] users={len(user2idx):,}  items={len(item2idx):,}")
+        item2idx = {i: j for j, i in enumerate(sorted(unique_items))}
+    
+        print(f"[BPR] users={len(user2idx):,} items={len(item2idx):,}")
         return user2idx, item2idx
 
     def _load_split(self, split: str, user2idx: dict,
