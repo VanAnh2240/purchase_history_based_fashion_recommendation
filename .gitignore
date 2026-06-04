@@ -29,3 +29,4 @@ embeddings/
 .ipynb_checkpoints/
 __pycache__/
 *.zip
+*.sql
