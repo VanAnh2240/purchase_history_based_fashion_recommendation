@@ -31,6 +31,7 @@ def main():
         elif args.feature == "fashionclip":
             from src.feature_extraction.hm.hm_fashionclip_extract import HMFashionCLIPExtractor
             extractor = HMFashionCLIPExtractor()
+
     extractor.extract()
 
     print("\nDone!")

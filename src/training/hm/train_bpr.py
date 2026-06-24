@@ -35,16 +35,7 @@ def set_seed(seed=SEED):
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Datasets
-# ─────────────────────────────────────────────────────────────────────────────
-
 class BPRTrainDataset(Dataset):
-    """
-    Triplet (user, pos, neg). Negatives pre-generated — resample() mỗi epoch.
-    Không gọi adj_csr trong __getitem__ → DataLoader multi-worker được.
-    """
     def __init__(self, user_ids: np.ndarray, item_ids: np.ndarray, n_items: int):
         self.users   = user_ids
         self.items   = item_ids
@@ -52,7 +43,6 @@ class BPRTrainDataset(Dataset):
         self.negs = np.random.randint(0, n_items, len(user_ids), dtype=np.int32)
 
     def resample(self):
-        """Gọi đầu mỗi epoch để thay negative mới."""
         self.negs = np.random.randint(0, self.n_items, len(self.users), dtype=np.int32)
 
     def __len__(self):
@@ -99,10 +89,6 @@ class BPREvalDataset(Dataset):
         return self.users[idx], self.items[idx], self.labels[idx]
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Trainer
-# ─────────────────────────────────────────────────────────────────────────────
-
 class HMBPRTrainer:
 
     def __init__(self):
@@ -113,8 +99,7 @@ class HMBPRTrainer:
         self.device   = DEVICE
         set_seed(SEED)
 
-    # ── helpers ───────────────────────────────────────────────────────────
-
+   
     def _build_idx_maps(self):
         print("[BPR] Loading full graph index map...")
     
@@ -182,7 +167,6 @@ class HMBPRTrainer:
             "f1":        f1_score(y_true, y_pred, zero_division=0),
         }
 
-    # ── train one epoch ───────────────────────────────────────────────────
 
     def _train_epoch(self, model, loader, optimizer, epoch: int) -> float:
         model.train()
@@ -207,8 +191,6 @@ class HMBPRTrainer:
 
         return total_loss / len(loader)
 
-    # ── evaluate ──────────────────────────────────────────────────────────
-
     @torch.no_grad()
     def _run_eval(self, model, dataset) -> tuple[np.ndarray, np.ndarray]:
         model.eval()
@@ -226,7 +208,6 @@ class HMBPRTrainer:
             labels.extend(label.numpy())
         return np.array(preds), np.array(labels)
 
-    # ── main entry ────────────────────────────────────────────────────────
 
     def train(self, evaluator=None):
         print(f"\n{'='*60}")
@@ -245,11 +226,11 @@ class HMBPRTrainer:
         del user2idx, item2idx
         gc.collect()
 
-        # 3. Build CSR adj (train only)
+        # 3. Build CSR adj
         print("[BPR] Building CSR adjacency matrix...")
         adj_csr = self._build_adj_csr(train_users, train_items, n_users, n_items)
 
-        # 4. Datasets — negatives pre-generated, không lazy trong __getitem__
+        # 4. Datasets
         print("[BPR] Building datasets (pre-generating negatives)...")
         train_dataset = BPRTrainDataset(train_users, train_items, n_items)
         print("  [DS] val:")
@@ -269,13 +250,11 @@ class HMBPRTrainer:
               f"batches/epoch={len(train_loader):,}")
 
         # 5. Model & optimizer
-        # FIX: dùng _LOGIT_SCALE=1.0 thay vì LOGIT_SCALE=2.0 từ config
         model = BPRModel(
             n_users=n_users, n_items=n_items,
             embedding_dim=EMBEDDING_DIM, logit_scale=_LOGIT_SCALE,
         ).to(self.device)
 
-        # FIX: dùng _LR=1e-3 và _WEIGHT_DECAY=1e-6 thay vì giá trị từ config
         optimizer = optim.Adam(
             model.parameters(), lr=_LR, weight_decay=_WEIGHT_DECAY,
         )

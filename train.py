@@ -1,5 +1,5 @@
 """
-train.py — CLI wrapper training
+train.py 
 """
 
 import argparse
@@ -52,14 +52,8 @@ def main():
 
     if args.dataset == "hm":
 
-        # feature required
         if args.model in ("lightgcn", "graphsage", "ngcf", "siamese") and args.feature is None:
             print(f"[ERROR] --feature là bắt buộc với model={args.model}")
-            sys.exit(1)
-
-        # type required only for siamese
-        if args.model == "siamese" and args.type is None:
-            print("[ERROR] --type là bắt buộc với model=siamese (item/user)")
             sys.exit(1)
 
         evaluator = Evaluator()
@@ -88,10 +82,7 @@ def main():
             trainer = HMBPRTrainer()
 
         elif args.model == "siamese":
-            if args.type == "item":
-                from src.training.hm.train_siamese import HMSiameseTrainer
-            else:  # user
-                from src.training.hm.train_siamese_user import HMSiameseTrainer
+            from src.training.hm.train_siamese import HMSiameseTrainer
 
             trainer = HMSiameseTrainer(feature=args.feature)
 

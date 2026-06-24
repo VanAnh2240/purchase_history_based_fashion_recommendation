@@ -32,7 +32,6 @@ _LOGIT_SCALE = LOGIT_SCALE
 
 ALL_GNN_MODELS = ["lightgcn", "graphsage", "ngcf"]
 
-# ─── Module-level cache ────────────────────────────────────────────────────
 _cache: dict = {}
 
 def _ck(*args):
@@ -45,8 +44,6 @@ def clear_cache():
         try:
             torch.cuda.empty_cache()
         except Exception as e:
-            # CUDA context có thể bị corrupt sau device-side assert
-            # → bỏ qua, không crash toàn bộ evaluation
             print(f"[WARN] clear_cache: cuda.empty_cache() failed ({e})")
 
 
@@ -57,10 +54,6 @@ def set_seed(seed=SEED):
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Datasets
-# ─────────────────────────────────────────────────────────────────────────────
 
 class EvalDataset(Dataset):
     def __init__(self, user_arr, item_arr, n_items, adj_csr, neg_ratio=1):
@@ -112,11 +105,6 @@ class BPREvalDatasetSimple(Dataset):
         return self.users[idx], self.items[idx], self.labels[idx]
 
 class SiameseEvalDataset(Dataset):
-    """
-    User-item evaluation cho Siamese:
-    positive: (user_history_emb, positive_item)
-    negative: (user_history_emb, random_negative_item)
-    """
     def __init__(
         self,
         test_users,
@@ -164,11 +152,6 @@ class SiameseEvalDataset(Dataset):
         item_vec = self.item_feat[i]
 
         return user_vec, item_vec, np.float32(label)
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# ModelEvaluator
-# ─────────────────────────────────────────────────────────────────────────────
 
 class ModelEvaluator:
 

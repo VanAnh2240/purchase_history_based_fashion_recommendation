@@ -46,11 +46,6 @@ def set_seed(seed=SEED):
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Datasets
-# ─────────────────────────────────────────────────────────────────────────────
-
 class HMTrainDataset(Dataset):
     def __init__(self, user_arr: np.ndarray, item_arr: np.ndarray,
                  n_items: int, adj_csr: sp.csr_matrix):
@@ -61,7 +56,6 @@ class HMTrainDataset(Dataset):
         self.negs    = np.random.randint(0, n_items, len(user_arr), dtype=np.int32)
 
     def resample(self):
-        """Resample negatives mỗi epoch — tránh false negative rõ ràng."""
         self.negs = np.random.randint(0, self.n_items, len(self.users), dtype=np.int32)
 
     def __len__(self):
@@ -107,20 +101,11 @@ class HMEvalDataset(Dataset):
             torch.tensor(label, dtype=torch.float),
         )
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Loss
-# ─────────────────────────────────────────────────────────────────────────────
-
 def bpr_loss(user_emb, pos_emb, neg_emb):
     pos_score = (user_emb * pos_emb).sum(dim=-1)
     neg_score = (user_emb * neg_emb).sum(dim=-1)
     return -F.logsigmoid(pos_score - neg_score).mean()
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Trainer
-# ─────────────────────────────────────────────────────────────────────────────
 
 class HMGNNTrainer:
 
@@ -141,8 +126,6 @@ class HMGNNTrainer:
         self.scaler = GradScaler("cuda")
 
         set_seed(SEED)
-
-    # ── helpers ───────────────────────────────────────────────────────────
 
     def _load_meta(self):
         with open(self.graph_dir / "graph_meta.json") as f:
@@ -230,13 +213,8 @@ class HMGNNTrainer:
             embedding_dim=EMBEDDING_DIM,
         ).to(self.device)
 
-    # ── FIX: inject CLIP embedding vào model ──────────────────────────────
 
     def _init_model_with_clip(self, model, item_feat: torch.Tensor):
-        """
-        Inject CLIP/FashionCLIP embedding để khởi tạo item_embedding.
-        Thay vì để Xavier random init hoàn toàn.
-        """
         if hasattr(model, "init_item_embeddings_from_clip"):
             item_feat_dev = item_feat.to(self.device)
             model.init_item_embeddings_from_clip(item_feat_dev)
@@ -245,8 +223,6 @@ class HMGNNTrainer:
                 torch.cuda.empty_cache()
         else:
             print(f"[WARN] Model {self.model_name} chưa có init_item_embeddings_from_clip, bỏ qua.")
-
-    # ── train one epoch ───────────────────────────────────────────────────
 
     def _train_epoch(self, model, loader, optimizer, edge_index, epoch=0):
         model.train()
@@ -268,7 +244,6 @@ class HMGNNTrainer:
             pos_ids  = pos_ids.to(self.device, non_blocking=True)
             neg_ids  = neg_ids.to(self.device, non_blocking=True)
 
-            # FIX: use_cache=True chỉ khi không phải bước đầu của accumulation
             use_cache = (step % _GRAD_ACCUM != 0)
 
             if not use_cache:
@@ -288,7 +263,6 @@ class HMGNNTrainer:
                 or ((step + 1) == len(loader))
             )
 
-            # self.scaler.scale(loss).backward(retain_graph=not is_last_accum)
             self.scaler.scale(loss).backward()
 
             if is_last_accum:
@@ -307,8 +281,6 @@ class HMGNNTrainer:
             )
 
         return total_loss / accum_count
-
-    # ── evaluate ──────────────────────────────────────────────────────────
 
     @torch.no_grad()
     def _run_eval(self, model, eval_dataset, edge_index):
@@ -351,8 +323,6 @@ class HMGNNTrainer:
             "f1":        f1_score(y_true, y_pred, zero_division=0),
         }
 
-    # ── main entry ────────────────────────────────────────────────────────
-
     def train(self, evaluator: "Evaluator | None" = None):
         print(f"\n{'='*60}")
         print(f" H&M GNN | model={self.model_name} | feature={self.feature}")
@@ -365,7 +335,6 @@ class HMGNNTrainer:
 
         user2idx, item2idx = self._load_mappings()
 
-        # Load CLIP embedding (CPU)
         item_feat = self._load_embeddings(n_items, item2idx)
         print(f"[SETUP] item_feat: {item_feat.shape}")
 

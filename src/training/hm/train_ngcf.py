@@ -50,11 +50,6 @@ def set_seed(seed=SEED):
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Datasets 
-# ─────────────────────────────────────────────────────────────────────────────
-
 class HMTrainDataset(Dataset):
     def __init__(self, user_arr: np.ndarray, item_arr: np.ndarray,
                  n_items: int, adj_csr: sp.csr_matrix):
@@ -110,20 +105,10 @@ class HMEvalDataset(Dataset):
             torch.tensor(label, dtype=torch.float),
         )
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# BPR Loss
-# ─────────────────────────────────────────────────────────────────────────────
-
 def bpr_loss(user_emb, pos_emb, neg_emb):
     pos_score = (user_emb * pos_emb).sum(dim=-1)
     neg_score = (user_emb * neg_emb).sum(dim=-1)
     return -F.logsigmoid(pos_score - neg_score).mean()
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Trainer
-# ─────────────────────────────────────────────────────────────────────────────
 
 class HMNGCFTrainer:
 
@@ -143,8 +128,6 @@ class HMNGCFTrainer:
 
         self.scaler = GradScaler("cuda")
         set_seed(SEED)
-
-    # ── Data helpers ──────────────────────────────────────────────────────
 
     def _load_meta(self) -> dict:
         with open(self.graph_dir / "graph_meta.json") as f:
@@ -235,7 +218,6 @@ class HMNGCFTrainer:
         else:
             print(f"[WARN] Model {self.model_name} không có init_item_embeddings_from_clip.")
 
-    # ── Training ──────────────────────────────────────────────────────────
     def _train_epoch(self, model, loader, optimizer, edge_index, epoch: int = 0) -> float:
         model.train()
         model.invalidate_cache()
@@ -251,7 +233,6 @@ class HMNGCFTrainer:
             pos_ids  = pos_ids.to(self.device,  non_blocking=True)
             neg_ids  = neg_ids.to(self.device,  non_blocking=True)
     
-            # ── THAY ĐỔI: autocast bọc cả forward lẫn loss ───────────────────
             with autocast("cuda"):
                 use_cache = (step % _GRAD_ACCUM != 0)
                 if not use_cache:
@@ -284,8 +265,6 @@ class HMNGCFTrainer:
     
         return total_loss / accum_count
 
-    # ── Evaluation ────────────────────────────────────────────────────────
-
     @torch.no_grad()
     def _run_eval(self, model, eval_dataset, edge_index):
         model.eval()
@@ -298,7 +277,6 @@ class HMNGCFTrainer:
             persistent_workers=(_NUM_WORKERS > 0),
         )
     
-        # ── THAY ĐỔI: autocast bọc cả forward ────────────────────────────────
         with autocast("cuda"):
             all_user_emb, all_item_emb = model(edge_index, use_cache=True)
     
@@ -324,8 +302,6 @@ class HMNGCFTrainer:
             "recall":    recall_score(y_true, y_pred, zero_division=0),
             "f1":        f1_score(y_true, y_pred, zero_division=0),
         }
-
-    # ── Main entry ────────────────────────────────────────────────────────
 
     def train(self, evaluator: "Evaluator | None" = None) -> dict:
         print(f"\n{'='*60}")
@@ -371,7 +347,6 @@ class HMNGCFTrainer:
               f"accum={_GRAD_ACCUM}  effective_batch={_TRAIN_BATCH_SIZE*_GRAD_ACCUM}  "
               f"batches/epoch={len(train_loader):,}")
 
-        # ── Model ─────────────────────────────────────────────────────────
         model = self._build_model(n_users, n_items)
         self._init_model_with_clip(model, item_feat)
         del item_feat
@@ -379,7 +354,6 @@ class HMNGCFTrainer:
             torch.cuda.empty_cache()
         print("[SETUP] CLIP embedding injected ✓")
 
-        # NGCF cần precompute norm_adj giống LightGCN
         n_nodes = n_users + n_items
         model.precompute_norm_adj(edge_index, n_nodes)
         print("[SETUP] norm_adj precomputed ✓")
@@ -416,7 +390,6 @@ class HMNGCFTrainer:
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
-        # ── Training loop ─────────────────────────────────────────────────
         for epoch in range(start_epoch, NUM_EPOCHS + 1):
             train_dataset.resample()
             train_loss = self._train_epoch(model, train_loader, optimizer, edge_index, epoch)
@@ -446,7 +419,6 @@ class HMNGCFTrainer:
 
         print(f"\n[TRAIN DONE] Best val F1={best_f1:.4f} at epoch {best_epoch}")
 
-        # ── Test ──────────────────────────────────────────────────────────
         print("\n[TEST] Loading best checkpoint...")
         ckpt = torch.load(ckpt_path, map_location=self.device, weights_only=False)
         model.load_state_dict(ckpt["model"])

@@ -41,9 +41,6 @@ class Evaluator:
 
         return metrics
 
-    # =========================
-    # CALL ONCE AFTER ALL EVALS
-    # =========================
     def save_report(self, dataset):
         df = pd.DataFrame(self.all_results)
 
@@ -51,7 +48,6 @@ class Evaluator:
             print("[REPORT] No data to save")
             return None
 
-        # sort by best metric
         sort_col = "F1-score" if "F1-score" in df.columns else "f1"
         if sort_col in df.columns:
             df = df.sort_values(sort_col, ascending=False)
@@ -61,7 +57,6 @@ class Evaluator:
 
         df.to_csv(report_path, index=False, float_format="%.4f")
 
-        # ===== PRINT FIRST, THEN SAVE DONE =====
         print("\n====== REPORT CONTENT ======")
         print(df.to_markdown(index=False))
 

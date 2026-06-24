@@ -14,17 +14,14 @@ def calculate_metrics(all_preds, all_targets, threshold=None):
     y_true = all_targets.astype(int)
     preds = np.array(all_preds, dtype=np.float64)
 
-    # AUC
     try:
         auc = roc_auc_score(y_true, preds)
     except ValueError:
         auc = 0.5
 
-    # Nếu user truyền threshold → dùng luôn
     if threshold is not None:
         best_threshold = float(threshold)
 
-    # Không truyền → auto bằng Youden's J
     else:
         try:
             fpr, tpr, thresholds = roc_curve(y_true, preds)

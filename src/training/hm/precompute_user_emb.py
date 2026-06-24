@@ -1,13 +1,9 @@
 """
 src/training/hm/precompute_user_emb.py
 
-Chạy MỘT LẦN để tính user history embeddings và cache ra disk.
-Các lần train sau chỉ cần load file cache → tiết kiệm 7-15 phút mỗi lần.
-
-Usage:
-    python -m src.training.hm.precompute_user_emb --feature clip
-    python -m src.training.hm.precompute_user_emb --feature fashionclip
-    python -m src.training.hm.precompute_user_emb --feature clip --force
+python -m src.training.hm.precompute_user_emb --feature clip
+python -m src.training.hm.precompute_user_emb --feature fashionclip
+python -m src.training.hm.precompute_user_emb --feature clip --force
 """
 
 import argparse
@@ -23,7 +19,6 @@ import pandas as pd
 import torch
 import torch.nn.functional as F
 
-# ── project root ─────────────────────────────────────────────────────────────
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
 from config import (
@@ -35,10 +30,6 @@ from config import (
 CSV_CHUNK = 1_000_000
 _USER_EMB_CHUNK = 500_000
 
-
-# =============================================================================
-# Helpers
-# =============================================================================
 
 def _load_embeddings(emb_dir: Path):
     raw = np.load(emb_dir / "embeddings.npy")
@@ -130,12 +121,7 @@ def _load_train_split(data_dir: Path, cust2idx, item2idx):
     return users, items
 
 
-# =============================================================================
-# Core
-# =============================================================================
-
 def _close_memmap(mm):
-    """Force-close memmap handle (important on Windows)."""
     if mm is not None:
         mm.flush()
         if hasattr(mm, "_mmap") and mm._mmap is not None:
@@ -149,9 +135,6 @@ def compute_user_hist_emb(
     n_users: int,
     out_path: Path,
 ):
-    """
-    user_hist_emb[u] = L2(mean(item_feat[i] for i in history(u)))
-    """
     dim = item_feat.shape[1]
     n = len(train_user)
 
@@ -237,7 +220,7 @@ def compute_user_hist_emb(
     del fp, accum, count
     gc.collect()
 
-    time.sleep(1)   # let Windows release handles
+    time.sleep(1)  
 
     tmp_accum.unlink(missing_ok=True)
     tmp_count.unlink(missing_ok=True)
@@ -249,9 +232,6 @@ def compute_user_hist_emb(
     return arr, users_with_hist
 
 
-# =============================================================================
-# Public API
-# =============================================================================
 
 def get_user_hist_emb(
     feature: str,
@@ -335,10 +315,6 @@ def get_user_hist_emb(
 
     return np.ascontiguousarray(arr)
 
-
-# =============================================================================
-# CLI
-# =============================================================================
 
 def main():
     parser = argparse.ArgumentParser()

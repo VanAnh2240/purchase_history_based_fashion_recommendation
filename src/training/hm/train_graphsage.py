@@ -37,7 +37,7 @@ CSV_CHUNK         = 500_000
 _TRAIN_BATCH_SIZE = BATCH_SIZE * 12
 _NUM_WORKERS      = 16
 _GRAD_ACCUM       = 1
-_L2_REG           = 1e-4   # FIX: L2 regularization weight cho BPR loss
+_L2_REG           = 1e-4 
 
 
 def set_seed(seed=SEED):
@@ -46,11 +46,6 @@ def set_seed(seed=SEED):
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Datasets
-# ─────────────────────────────────────────────────────────────────────────────
 
 class HMTrainDataset(Dataset):
     def __init__(self, user_arr: np.ndarray, item_arr: np.ndarray,
@@ -61,13 +56,7 @@ class HMTrainDataset(Dataset):
         self.adj_csr = adj_csr
         self.negs    = np.random.randint(0, n_items, len(user_arr), dtype=np.int32)
 
-    # FIX: hỗ trợ popularity-based hard negative sampling
     def resample(self, item_popularity: np.ndarray = None):
-        """
-        Resample negatives mỗi epoch.
-        - item_popularity=None  → uniform random (dễ)
-        - item_popularity=array → sample theo popularity^0.75 (harder negatives)
-        """
         if item_popularity is not None:
             probs = item_popularity / item_popularity.sum()
             self.negs = np.random.choice(
@@ -119,10 +108,6 @@ class HMEvalDataset(Dataset):
             torch.tensor(label, dtype=torch.float),
         )
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Loss
-# ─────────────────────────────────────────────────────────────────────────────
 def bpr_loss(user_emb, pos_emb, neg_emb, l2_reg: float = _L2_REG):
     pos_score = (user_emb * pos_emb).sum(dim=-1)
     neg_score = (user_emb * neg_emb).sum(dim=-1)
@@ -133,11 +118,6 @@ def bpr_loss(user_emb, pos_emb, neg_emb, l2_reg: float = _L2_REG):
         + neg_emb.norm(dim=-1).pow(2).mean()
     )
     return bpr + l2_reg * l2
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Trainer
-# ─────────────────────────────────────────────────────────────────────────────
 
 class HMGNNTrainer:
 
@@ -159,7 +139,6 @@ class HMGNNTrainer:
 
         set_seed(SEED)
 
-    # ── helpers ───────────────────────────────────────────────────────────
 
     def _load_meta(self):
         with open(self.graph_dir / "graph_meta.json") as f:
@@ -257,8 +236,6 @@ class HMGNNTrainer:
         else:
             print(f"[WARN] Model {self.model_name} chưa có init_item_embeddings_from_clip, bỏ qua.")
 
-    # ── train one epoch ───────────────────────────────────────────────────
-
     def _train_epoch(self, model, loader, optimizer, edge_index, epoch=0):
         model.train()
         model.invalidate_cache()
@@ -287,7 +264,6 @@ class HMGNNTrainer:
             all_user_emb, all_item_emb = model(edge_index, use_cache=use_cache)
 
             with autocast("cuda"):
-                # FIX: bpr_loss giờ có L2 regularization
                 loss = bpr_loss(
                     all_user_emb[user_ids],
                     all_item_emb[pos_ids],
@@ -318,8 +294,6 @@ class HMGNNTrainer:
 
         return total_loss / accum_count
 
-    # ── evaluate ──────────────────────────────────────────────────────────
-
     @torch.no_grad()
     def _run_eval(self, model, eval_dataset, edge_index):
         model.eval()
@@ -333,7 +307,6 @@ class HMGNNTrainer:
             persistent_workers=(_NUM_WORKERS > 0),
         )
 
-        # FIX: use_cache=False để tránh dùng cache stale từ train
         all_user_emb, all_item_emb = model(edge_index, use_cache=False)
 
         preds, labels = [], []
@@ -343,8 +316,6 @@ class HMGNNTrainer:
             item_ids = item_ids.to(self.device)
 
             with autocast("cuda"):
-                # FIX: raw dot-product, không sigmoid
-                # BPR score không calibrate cho sigmoid threshold tuyệt đối
                 score = (all_user_emb[user_ids] * all_item_emb[item_ids]).sum(dim=-1)
 
             preds.extend(score.cpu().float().numpy())
@@ -353,7 +324,6 @@ class HMGNNTrainer:
         preds  = np.array(preds)
         labels = np.array(labels)
 
-        # FIX: min-max normalize để threshold có ý nghĩa
         score_min, score_max = preds.min(), preds.max()
         if score_max - score_min > 1e-8:
             preds = (preds - score_min) / (score_max - score_min)
@@ -388,8 +358,6 @@ class HMGNNTrainer:
             "threshold": best_threshold,
         }
 
-    # ── main entry ────────────────────────────────────────────────────────
-
     def train(self, evaluator: "Evaluator | None" = None):
         print(f"\n{'='*60}")
         print(f" H&M GNN | model={self.model_name} | feature={self.feature}")
@@ -419,9 +387,8 @@ class HMGNNTrainer:
 
         print(f"[SETUP] train={len(train_users):,}  val={len(val_users):,}  test={len(test_users):,}")
 
-        # FIX: tính item popularity cho hard negative sampling
         item_counts     = np.bincount(train_items, minlength=n_items).astype(np.float32)
-        item_popularity = item_counts ** 0.75   # smoothed (word2vec style)
+        item_popularity = item_counts ** 0.75 
         print(f"[SETUP] item popularity computed (non-zero items: {(item_counts > 0).sum():,})")
 
         train_dataset = HMTrainDataset(train_users, train_items, n_items, adj_csr)
@@ -444,7 +411,6 @@ class HMGNNTrainer:
 
         model = self._build_model(n_users, n_items)
 
-        # FIX: chỉ gọi 1 lần (bản cũ bị duplicate)
         self._init_model_with_clip(model, item_feat)
         del item_feat
         if torch.cuda.is_available():
@@ -505,7 +471,6 @@ class HMGNNTrainer:
             val_preds, val_labels = self._run_eval(model, val_dataset, edge_index)
             val_metrics = self._compute_metrics(val_preds, val_labels)
 
-            # FIX: scheduler theo AUC
             scheduler.step(val_metrics["auc"])
 
             print(
@@ -518,7 +483,6 @@ class HMGNNTrainer:
                 f"thr={val_metrics['threshold']:.4f}"
             )
 
-            # FIX: save checkpoint theo AUC thay vì F1
             if val_metrics["auc"] > best_auc:
                 best_auc          = val_metrics["auc"]
                 best_epoch        = epoch
