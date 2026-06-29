@@ -1,17 +1,5 @@
 """
 generate_sql_product.py
-===============
-Đọc articles_demo.csv + article_ids_demo.csv từ máy local,
-xuất ra file hm_import.sql để import thẳng vào phpMyAdmin.
-
-KHÔNG cần kết nối database.
-
-Chạy:
-    pip install pandas tqdm
-    python generate_sql_product.py
-
-Output:
-    hm_product_import.sql
 """
 
 import re
@@ -21,9 +9,6 @@ from tqdm import tqdm
 from pathlib import Path
 from datetime import datetime
 
-# ═══════════════════════════════════════════════════════════════
-# CONFIG — chỉnh 2 dòng này
-# ═══════════════════════════════════════════════════════════════
 ARTICLES_CSV    = "data/demo/articles_demo.csv"
 ARTICLE_IDS_CSV = "data/demo/article_ids_demo.csv"
 OUTPUT_SQL      = "hm_product_import.sql"
@@ -35,13 +20,10 @@ HM_CATSUB_PREFIX   = "HM"
 HM_COLOR_OFFSET    = 90000
 EMBEDDING_MODEL    = "fashionclip_ngcf"
 
-# Số INSERT gộp vào 1 câu (tránh câu SQL quá dài)
 BATCH_SIZE = 200
-# ═══════════════════════════════════════════════════════════════
 
 
 def esc(val) -> str:
-    """Escape giá trị để dùng trong SQL string, trả về 'NULL' nếu None/NaN."""
     if val is None:
         return "NULL"
     if isinstance(val, float) and pd.isna(val):
@@ -53,7 +35,6 @@ def esc(val) -> str:
 
 
 def write_batches(f, table: str, columns: list, rows: list):
-    """Ghi INSERT IGNORE theo batch."""
     cols = ", ".join(columns)
     for i in range(0, len(rows), BATCH_SIZE):
         batch = rows[i : i + BATCH_SIZE]
@@ -69,10 +50,10 @@ def main():
     # ── Load CSV ──────────────────────────────────────────────
     print("\nĐọc CSV ...")
     if not Path(ARTICLES_CSV).exists():
-        print(f"❌ Không tìm thấy: {ARTICLES_CSV}")
+        print(f"Không tìm thấy: {ARTICLES_CSV}")
         sys.exit(1)
     if not Path(ARTICLE_IDS_CSV).exists():
-        print(f"❌ Không tìm thấy: {ARTICLE_IDS_CSV}")
+        print(f"Không tìm thấy: {ARTICLE_IDS_CSV}")
         sys.exit(1)
 
     articles = pd.read_csv(ARTICLES_CSV, dtype={"article_id": str})
@@ -83,17 +64,14 @@ def main():
 
     print(f"  articles: {len(articles):,} | article_ids: {len(article_ids_df):,}")
 
-    # ── Build mapping tables (in-memory) ──────────────────────
-    cat_map    = {}   # index_group_name → category_id
-    catsub_map = {}   # (index_group_name, section_name) → category_sub_id
-    color_map  = {}   # colour_group_name → color_code
-
-    # category
+    cat_map    = {}   
+    catsub_map = {}  
+    color_map  = {}  
+    
     groups = sorted(articles["index_group_name"].dropna().unique())
     for i, group in enumerate(groups, start=1):
         cat_map[group] = f"{HM_CATEGORY_PREFIX}{i:02d}"
 
-    # category_sub
     sections = (
         articles[["index_group_name", "section_name"]]
         .dropna()
@@ -106,12 +84,10 @@ def main():
         catsub_map[key] = f"{HM_CATSUB_PREFIX}{sub_counter:03d}"
         sub_counter += 1
 
-    # color
     colors = sorted(articles["colour_group_name"].dropna().unique())
     for i, cname in enumerate(colors):
         color_map[cname] = HM_COLOR_OFFSET + i
 
-    # ── Ghi SQL ───────────────────────────────────────────────
     print(f"\nXuất ra {OUTPUT_SQL} ...")
     with open(OUTPUT_SQL, "w", encoding="utf-8") as f:
 

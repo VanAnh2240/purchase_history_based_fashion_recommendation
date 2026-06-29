@@ -11,14 +11,12 @@ from typing import List
 
 from src.models.ngcf import NGCF
 
-# ── Cấu hình ──────────────────────────────────────────────────────────────────
 CHECKPOINT_PATH = os.getenv("CHECKPOINT_PATH", "checkpoints/hm/fashionclip/ngcf/fashionclip_ngcf.pth")
 ARTICLE_IDS_CSV = os.getenv("ARTICLE_IDS_CSV", "embeddings/hm/fashionclip/article_ids.csv")
 GRAPH_EDGE_PATH = os.getenv("GRAPH_EDGE_PATH", "graphs/hm/fashionclip/edge_index.pt")
 EMB_CACHE_PATH  = os.getenv("EMB_CACHE_PATH",  "data/demo/emb_cache.npz")
 TOP_K_DEFAULT   = 100
 
-# ── Singleton state ────────────────────────────────────────────────────────────
 class _State:
     users_emb   : np.ndarray = None  
     items_emb   : np.ndarray = None
@@ -29,7 +27,6 @@ S = _State()
 app = FastAPI(title="AuraFit Recommendation API", version="1.0.0")
 
 
-# ── Startup ───────────────────────────────────────────────────────────────────
 @app.on_event("startup")
 def load_model():
     import pandas as pd
@@ -123,7 +120,6 @@ def recommend_filter(customer_id: int, req: FilterRequest):
     if customer_id < 0 or customer_id >= num_users:
         raise HTTPException(404, f"customer_id={customer_id} không hợp lệ")
 
-    # Chỉ lấy indices của các article_id có trong model
     indices = [S.article_idx[aid] for aid in req.article_ids if aid in S.article_idx]
     if not indices:
         raise HTTPException(404, "Không có article_id nào khớp với model")

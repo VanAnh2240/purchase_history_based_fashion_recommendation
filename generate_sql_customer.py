@@ -1,23 +1,5 @@
 """
 generate_customer_sql.py
-========================
-Đọc user_list.csv (20 demo customers) từ máy local,
-xuất ra file customer_import.sql để import vào phpMyAdmin.
-
-KHÔNG cần kết nối database.
-
-Cấu trúc bảng liên quan:
-  - customer       : thông tin tài khoản (username, password, email, ...)
-  - profile        : thông tin cá nhân (để trống, tạo sau)
-  - cart           : giỏ hàng (tạo tự động khi insert customer)
-  - hm_user_map    : mapping customer_id (int) ↔ hm_customer_id (string H&M) ↔ internal_idx
-
-Chạy:
-    pip install pandas tqdm
-    python generate_sql_customer.py
-
-Output:
-    hm_customer_import.sql
 """
 
 import sys
@@ -26,17 +8,11 @@ from tqdm import tqdm
 from pathlib import Path
 from datetime import datetime
 
-# ═══════════════════════════════════════════════════════════════
-# CONFIG — chỉnh các dòng này nếu cần
-# ═══════════════════════════════════════════════════════════════
 USER_LIST_CSV   = "data/demo/user_list.csv"       
 CUSTOMERS_CSV   = "data/processed/hm/customers.csv"
 OUTPUT_SQL      = "hm_customer_import.sql"
 CUSTOMER_ID_START = 100
 
-# Mật khẩu mặc định cho tất cả demo accounts (đã hash bcrypt)
-# Giá trị này tương đương plaintext: "Demo@12345"
-# DEFAULT_PASSWORD = "$2y$12$92IXUNpkjO0rOQ5byMi.Ye4oKoEa3Ro9llC/.og/at2.uSc/kDTKK"
 DEFAULT_PASSWORD = "DemoHM@12345"
 
 EMBEDDING_MODEL = "fashionclip_ngcf"
@@ -57,7 +33,6 @@ def esc(val) -> str:
 
 
 def write_batches(f, table: str, columns: list, rows: list):
-    """Ghi INSERT IGNORE theo batch."""
     if not rows:
         print(f"    ⚠ Không có row nào cho bảng {table}, bỏ qua.")
         return
@@ -77,14 +52,13 @@ def main():
     print("\nĐọc CSV ...")
 
     if not Path(USER_LIST_CSV).exists():
-        print(f"❌ Không tìm thấy: {USER_LIST_CSV}")
+        print(f"Không tìm thấy: {USER_LIST_CSV}")
         sys.exit(1)
 
     user_list = pd.read_csv(USER_LIST_CSV, dtype={"customer_id": str})
     hm_ids = user_list["customer_id"].tolist()
     print(f"  user_list: {len(hm_ids)} users")
 
-    # Load customers.csv gốc của H&M nếu có (để lấy age)
     customers_hm = None
     if Path(CUSTOMERS_CSV).exists():
         customers_hm = pd.read_csv(CUSTOMERS_CSV, dtype={"customer_id": str})
@@ -105,7 +79,7 @@ def main():
         f.write("SET NAMES utf8mb4;\n")
         f.write("SET foreign_key_checks = 0;\n\n")
 
-        # ── 1. cart (phải tạo trước vì customer FK tới cart) ──
+        # ── 1. cart ──
         print("  [1/4] cart ...")
         f.write("-- =============================================\n")
         f.write("-- 1. cart (tạo giỏ hàng trống cho mỗi demo user)\n")
@@ -130,19 +104,16 @@ def main():
         customer_rows = []
         for i, hm_cid in enumerate(tqdm(hm_ids, desc="  customer")):
             db_id   = CUSTOMER_ID_START + i
-            cart_id = db_id  # 1-1 với cart
+            cart_id = db_id  
 
-            # Lấy tuổi từ file H&M nếu có
             birthday_val = "NULL"
             if customers_hm is not None:
                 row = customers_hm[customers_hm["customer_id"] == hm_cid]
                 if not row.empty and not pd.isna(row.iloc[0].get("age", float("nan"))):
                     age = int(row.iloc[0]["age"])
-                    # Ước lượng năm sinh (demo), tháng/ngày mặc định 01-01
                     birth_year = datetime.now().year - age
                     birthday_val = f"'{birth_year}-01-01'"
 
-            # username: hm_demo_u{i+1:02d}  (ngắn, dễ nhớ khi test)
             username = f"hm_demo_u{i+1:02d}"
             email    = f"hm_demo{i+1:02d}@aurafit.demo"
 
@@ -166,7 +137,7 @@ def main():
             customer_rows,
         )
 
-        # ── 3. profile (tạo row trống để app không bị lỗi khi query) ─
+        # ── 3. profile  ─
         print("  [3/4] profile ...")
         f.write("-- =============================================\n")
         f.write("-- 3. profile (row trống — user có thể điền sau)\n")
@@ -194,7 +165,7 @@ def main():
         map_rows = []
         for i, hm_cid in enumerate(tqdm(hm_ids, desc="  hm_user_map")):
             db_id        = CUSTOMER_ID_START + i
-            internal_idx = i   # index trong model NGCF (0-based, tương ứng vị trí trong user_list.csv)
+            internal_idx = i   
             map_rows.append(
                 f"({db_id}, {esc(hm_cid)}, {internal_idx}, {esc(EMBEDDING_MODEL)})"
             )
